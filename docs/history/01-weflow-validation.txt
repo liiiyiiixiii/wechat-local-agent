@@ -1,0 +1,40 @@
+后续复核更新：初始化失败已定位为组件内置日期限制；上轮 -1006 是普通 Node 宿主名检查未通过。真实 Electron / WeFlow Worker 返回 -1000 与过期日志，取消隔离也相同。详见 diagnosis/初始化故障定位报告.txt。以下保留首次验证记录。
+
+WeFlow 组件接入运行验证（2026-10-16）
+
+结论：部分成功。WeFlow 5.0.0 已构建并启动；图片插件可以解密合成测试图片；聊天数据库读取链路尚未跑通。
+
+环境：Apple A18 Pro / arm64，macOS 26.3.2，SIP 开启。未修改微信程序、原始聊天数据或原压缩包。
+源码：https://github.com/hicccc77/WeFlow
+提交：73cab4c10f64e15fd6e670804c6852024f7fa5e0
+测试副本：validation/WeFlow；组件副本：validation/component-test。
+
+已完成：
+1. npm 安装依赖并完成 vite build。上游 React peer dependency 冲突使用 --legacy-peer-deps 处理；未关闭 TLS 验证；安装时忽略所有生命周期脚本，随后单独运行 Electron 官方下载脚本及其校验流程。
+2. Electron 43.5.0 启动 WeFlow，欢迎页和主界面成功渲染。runtime/window-0.png 为欢迎页截图，window-1.png 为主界面协议弹窗截图。测试没有代用户点击接受协议。
+3. 测试配置 runtime/user-data/WeFlow-config.json 已设置 wcdbLibPath 和 imageNativeAddonPath，均指向该压缩包的组件副本。未配置密钥提供器和 WeLive，没有写入真实账号、密钥或数据库路径。
+4. libWCDB.dylib 与 libwcdb_api.dylib 可加载，必要函数可绑定。
+5. 图片插件加载成功，生成的 68 字节 PNG 经 XOR 编码后交给插件解密，结果逐字节相同。该结果只验证合成 XOR 图片，未验证用户真实图片或 AES/WXGF 全部格式。
+
+阻塞项：
+1. wcdb_init() 返回 -1006；使用 WeFlow 5.0 真实 WcdbCore 调用代码也相同，新版 Koffi 3.1.0 同样复现。内部日志：wcdb_init [SecurityStatus:2]。
+2. 旧版 InitProtection() 入口返回 -101。初始化失败发生在提供任何真实账号或数据库之前。
+3. 错误原因未完全确定。测试禁止 IP 网络访问并限制文件访问，不能排除隔离环境影响。不能据此断言组件已过期、必须关闭 SIP，或所有正常安装环境都无法使用。界面的通用报错建议关闭安全防护，未执行该建议。
+4. 密钥组件 xkey_helper / libwx_key.dylib 的 arm64 签名验证失败；旧版命令行协议也不符合 5.0 keyProviderPath 的 JSON stdin / NDJSON stdout 协议，不能原样接入。未注入微信或尝试获取真实密钥。
+5. 该包不含 WeLive，批量原始导出引擎尚未接入。
+
+测试隔离说明：
+组件测试由 macOS sandbox-exec 限制到测试目录，阻止 IP 网络及其他用户文件访问。GUI 另允许本地 UNIX IPC。为兼容外层隔离，GUI 启动器仅对测试 Electron 使用 --no-sandbox，并跳过单实例临时套接字检查；外层 macOS 隔离持续生效，未关闭 SIP、Gatekeeper 或修改系统配置。临时目录为 launch/temp-path.txt 中记录的测试专用目录。
+启动脚本 launch/start-test.command 仅供隔离测试，不是已完成部署的正式安装版。它仍限制访问真实微信数据。
+
+下一步：先查明或更换能初始化的 macOS WCDB 实现，再解决符合新版协议的密钥提供器（或使用用户已取得的密钥）；保持 SIP 开启继续验证。现阶段不应把“界面启动”当作“聊天记录解密成功”。
+
+复核材料：
+component-test/media.log
+component-test/init.log
+component-test/legacy-init.log
+component-test/weflow-host.log
+weflow-current-koffi.log
+weflow-build.log
+gui.log
+results.json

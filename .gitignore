@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Private runtime data: chat content, keys, indexes and archives never enter Git.
+# ---------------------------------------------------------------------------
+/private/
+
+# Machine-local artifacts and outputs from other experiments.
+/inspection/
+/output/
+/tmp/
+
+# ---------------------------------------------------------------------------
+# Historical validation assets are kept on disk but not in Git. The deployed app
+# bundle and the bulk-export command are the only runtime pieces kept in the repo.
+# ---------------------------------------------------------------------------
+/validation/*
+!/validation/微信 Agent 服务.app/
+!/validation/批量导出微信.command
+
+# Generated helper source; rebuild with tools/build_helper.py.
+/tools/helper.c
+
+# OS / interpreter / tooling noise
+.DS_Store
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+*.partial

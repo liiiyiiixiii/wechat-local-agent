@@ -1,0 +1,43 @@
+数据库初始化失败原因复核 — 2026-10-16
+
+结论：本次初始化失败不是测试隔离导致。当前 macOS libwcdb_api.dylib 内置的期限检查已经触发。SIP 保持开启。
+
+需要纠正上一轮的解释：
+上一轮使用 WeFlow WcdbCore 真实代码，但宿主仍是普通 Node。因此 -1006 不能当作 WeFlow Electron 内的同一个错误。
+本轮运行原版 Electron 可执行文件、以及未经改动的 WeFlow 5.0 编译产物 dist-electron/wcdbWorker.js，已确认真实宿主下错误为 -1000，并有明确的 expired 日志。
+
+对照结果：
+普通 Node + 严格隔离：wcdb_init=-1006，SecurityStatus:2。
+普通 Node + 不使用 sandbox-exec：wcdb_init=-1006，SecurityStatus:2。
+Electron + 严格隔离：wcdb_init=-1000，SecurityStatus:0，expired: self-destruct triggered。
+Electron + 不使用 sandbox-exec：wcdb_init=-1000，同样的过期日志。
+旧 InitProtection 在上述四种环境均为 -101。
+另外用实际 Electron 主进程启动未修改的 WeFlow wcdbWorker，以不存在的测试账号路径和空密钥调用 testConnection；严格隔离/不使用 sandbox-exec 均返回 -1000 与相同过期日志。
+无隔离对照没有禁网或限制文件访问，因此不是仅放宽部分限制的测试。全程未提供真实聊天数据库、账号或密钥。
+
+静态指令证据：
+1. VerifySecurityInternal 获取可执行文件名并比较允许名单，其中包含 electron、weflow 等，不包含 node；不匹配时将状态标记为失败。wcdb_init 在此状态下返回 -1006。
+2. InitProtection 调用 time(NULL)，与 0x6abda27f（1790812799）比较；超过即返回 -101。这是 2026-09-30 23:59:59 UTC，即北京时间 2026-10-01 07:59:59。
+3. wcdb_init 通过宿主检查后，使用 mktime 构造本地时间 2026-09-30 23:59:59：tm_sec=59, tm_min=59, tm_hour=23, tm_mday=30, tm_mon=8, tm_year=126。当前时间超过这个时间时记录 expired 文本并返回 -1000。
+4. InitProtection 和 wcdb_init 是两处独立日期判断，时区解释不同，但当前日期均已超过。
+5. 检查的初始化失败路径没有调用 SIP 状态检测；宿主名和日期条件已足以解释观察到的结果。WeFlow UI 将 -1000/-1006 映射成通用“关闭安全防护”提示，该提示不是具体诊断，不应据此关闭 SIP。
+
+边界：
+没有修改库、改系统时间、伪造时间函数、关闭 SIP 或重签微信。
+日志中的 self-destruct 是库输出的原文；本次观察到的过期分支记录日志并返回错误，未据此声称发生文件删除。所有 10 个测试案例中的两个动态库哈希均保持不变。
+严格隔离实际 Worker 测试中另有 Electron 子进程与日志落盘权限错误；无隔离对照无这些错误，但数据库仍在相同过期分支失败，因此它们不是本次初始化失败的必要原因。
+该结论只针对压缩包内这份 macOS 数据库组件，不代表其他版本或其他组件同样过期。
+
+处理方向：
+保持 SIP 开启。需要有效期限内、兼容当前 WeFlow 的 macOS WCDB 构建，或可审查源码构建的替代实现。仅调整路径、文件权限、放开联网或取消隔离，不能解决这份二进制的日期限制。密钥获取仍是后续独立问题。
+
+文件证据：
+matrix-results.json（8 组直接调用对照）
+cases/actual-worker-strict/output.log
+cases/actual-worker-none/output.log
+key-instructions.txt（相关机器指令）
+indirect-symbols.txt（time/mktime 导入解析）
+integrity-after-tests.json（组件哈希复核）
+
+libwcdb_api.dylib SHA256: 14235df4890a66bd04db43007249e35353c8818d1190a90389741cba9589beef
+最终系统状态：System Integrity Protection status: enabled.

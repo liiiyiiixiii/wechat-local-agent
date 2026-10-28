@@ -137,7 +137,11 @@ class Store:
             return
         target = row['completed'] + (2 if row['state'] == 'running' else 1)
         if target > row['requested']:
-            self.c.execute("UPDATE jobs SET state='pending',requested=? WHERE id='media'", (target,))
+            if row['state'] == 'running':
+                # Keep "running" visible; the worker updates state when it finishes.
+                self.c.execute("UPDATE jobs SET requested=? WHERE id='media'", (target,))
+            else:
+                self.c.execute("UPDATE jobs SET state='pending',requested=? WHERE id='media'", (target,))
 
     def event(self, kind, mid, version, details=None):
         self.c.execute('INSERT INTO changes(kind,message_id,at,version,details) VALUES(?,?,?,?,?)',

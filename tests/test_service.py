@@ -178,7 +178,7 @@ class ServiceTests(unittest.TestCase):
             self.store.c.execute("UPDATE jobs SET state='running',requested=4,completed=3 WHERE id='media'")
             self.store.queue_media();self.store.queue_media()
         row=self.store.c.execute("SELECT * FROM jobs WHERE id='media'").fetchone()
-        self.assertEqual((row['requested'],row['completed']),(5,3))
+        self.assertEqual((row['requested'],row['completed'],row['state']),(5,3,'running'))
         with self.store.c:self.store.queue_media()
         row=self.store.c.execute("SELECT * FROM jobs WHERE id='media'").fetchone()
         self.assertEqual(row['requested'],5)

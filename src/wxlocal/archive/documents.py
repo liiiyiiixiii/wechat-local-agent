@@ -37,7 +37,8 @@ for line in (root/'asset-inventory.jsonl').read_text().splitlines():
     row['status']='requires_ocr'
     ocr=Path(__file__).with_name('pdf_ocr');ocrout=root/'document-text'/(key+'.ocr.txt');ocrout.parent.mkdir(exist_ok=True)
     if ocr.exists():
-     done=subprocess.run([str(ocr),str(file),str(ocrout)],capture_output=True,text=True,timeout=max(60,len(texts)*45))
+     # Bound OCR below the daemon's 30-minute media-job timeout; oversized scans retry hourly.
+     done=subprocess.run([str(ocr),str(file),str(ocrout)],capture_output=True,text=True,timeout=min(max(60,len(texts)*45),1200))
      if done.returncode==0 and ocrout.exists():
       parts=[clean(ocrout.read_text())];row['status']='ocr_extracted';row['note']='Local Apple Vision OCR; check the original for recognition errors.'
   elif ext=='.xlsx':

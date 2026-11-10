@@ -1,6 +1,8 @@
 # WeChat Local Agent
 
-在自己的电脑上搜索微信聊天记录，让支持 MCP 的 AI 助手也能查阅同一份历史。输入关键词可以同时找到聊天正文、附件名和已提取的文档文字；每条结果都带有消息 ID，可用它展开前后文，或用 `wechat://message/<消息ID>` 引用原消息。
+WeChat Local Agent 将微信已同步到本机的聊天记录解密并保存在你的电脑上，作为 Codex 和其他支持 MCP 的 AI 助手可以查询的本地知识库。
+
+归档既保留明文 SQLite 数据库，也提供按会话和月份整理的 Markdown 聊天记录，并保存本机可用的附件。Codex 可以通过 MCP 检索聊天正文和已提取的文档内容，查看一条消息的前后文，并在回答中用消息 ID 引用原话。
 
 **Windows 优先。** 已在 Windows 11 x64、Python 3.11 上用人工加密数据库验证安装、查询、归档和 MCP 全流程。真实微信版本的兼容性仍需按账号核验。macOS 保留既有入口，本版尚未实机复验。
 
@@ -119,4 +121,4 @@ python3 -m venv .venv
 & $py -m wxlocal.archive.sqlcipher self-test
 ```
 
-Windows 测试覆盖加密样例、WAL 增量读取、服务重启、MCP stdio、文档提取和归档篡改检查。真实账号的媒体解码、Windows 注销后自启动、macOS 权限与旧部署升级仍需实机验证。[Windows CI](.github/workflows/windows.yml) · [验收环境与同步基准](docs/operations.md#本轮-windows-验收记录)
+Windows 测试覆盖加密样例、WAL 增量读取、服务重启、MCP stdio、文档提取和归档篡改检查。

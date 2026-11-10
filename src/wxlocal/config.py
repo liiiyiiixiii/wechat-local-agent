@@ -1,113 +1,130 @@
-"""Single source of truth for paths, account scope and external runtimes.
+"""Current-user settings, including compatibility with the original macOS installation."""
 
-Everything machine-specific (installation paths, keys, archive location) is resolved
-here so the rest of the package never hardcodes a user path.
-"""
 import datetime as dt
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / 'src'
-STATE = ROOT / 'private/agent-service'
-SOCKET_DIR = Path.home() / '.wechat-agent'
+WINDOWS = os.name == 'nt'
+LEGACY = (
+    not WINDOWS
+    and Path(os.environ.get('WXLOCAL_HOME', ROOT / 'private')).resolve() == (ROOT / 'private').resolve()
+    and (ROOT / 'private/real-test.json').exists()
+)
+default_home = (
+    Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'WeChatLocalAgent'
+    if WINDOWS
+    else Path.home() / 'Library/Application Support/WeChatLocalAgent'
+)
+HOME = (
+    Path(os.environ.get('WXLOCAL_HOME', ROOT / 'private' if LEGACY else default_home)).expanduser().resolve()
+)
+SETTINGS = HOME / 'config.json'
+STATE = HOME / 'agent-service'
+SOCKET_DIR = Path.home() / '.wechat-agent' if LEGACY else STATE
 SOCKET = SOCKET_DIR / 'service.sock'
-PYTHON = ROOT / 'private/agent-venv/bin/python'
+PYTHON = Path(sys.executable)
 LABEL = 'local.wechat.agent'
 TZ = dt.timezone(dt.timedelta(hours=8))
-
-# Runtime assets that live outside the package because macOS permissions and large
-# vendored builds are tied to their current locations.
 WCDB_LIBRARY = ROOT / 'validation/components/macos-arm64/libWCDB.dylib'
 HELPER_APP = ROOT / 'validation/微信 Agent 服务.app'
 HELPER = HELPER_APP / 'Contents/MacOS/WeChatAgentService'
-LEGACY_ARCHIVE = ROOT / 'private/exports'
-# Compatibility shims keep LaunchAgent / Codex configuration unchanged after refactor.
+LEGACY_ARCHIVE = HOME / 'exports'
 MCP_ENTRY = ROOT / 'agent_service/mcp_server.py'
-
-_DOCUMENT_RUNTIME = None
-
-
-def dumps_json_path(path, default=None):
-    path = Path(path)
-    return json.loads(path.read_text()) if path.exists() else default
 
 
 def prepare():
     os.umask(0o077)
-    for p in (STATE, SOCKET_DIR):
-        p.mkdir(parents=True, exist_ok=True, mode=0o700)
-        p.chmod(0o700)
+    # Do not change ACLs on an unrelated directory supplied as WXLOCAL_HOME.
+    if HOME.exists() and not LEGACY and not (HOME / '.wxlocal-home').is_file():
+        if any(HOME.iterdir()):
+            raise ValueError('WXLOCAL_HOME must be a dedicated empty directory on first use')
+    HOME.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if WINDOWS and not (HOME / '.wxlocal-home').is_file():
+        from .windows import protect_directory
+
+        protect_directory(HOME)
+    (HOME / '.wxlocal-home').touch(mode=0o600, exist_ok=True)
+    for path in (STATE, SOCKET_DIR):
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not WINDOWS:
+            path.chmod(0o700)
 
 
 def private_config():
-    """Raw private configuration: account directory, keys and codec addon paths."""
-    return json.loads((ROOT / 'private/real-test.json').read_text())
+    if SETTINGS.exists():
+        return json.loads(SETTINGS.read_text(encoding='utf-8-sig'))
+    if LEGACY:
+        return json.loads((HOME / 'real-test.json').read_text(encoding='utf-8'))
+    raise ValueError('configuration_missing: run configure --account PATH --keys FILE')
 
 
 def account_dir():
-    return Path(private_config()['accountDir']).resolve()
+    return Path(private_config()['accountDir']).expanduser().resolve()
 
 
 def keys_file():
-    return ROOT / 'private/bootstrap-20261016/verified-keys.json'
+    value = private_config().get('keysFile')
+    if value:
+        return Path(value).expanduser().resolve()
+    if LEGACY:
+        return HOME / 'bootstrap-20261016/verified-keys.json'
+    raise ValueError('keysFile_missing')
+
+
+def online():
+    return private_config().get('allowCdn') is True
 
 
 def config():
-    """Load the configured account, its seed archive and the DB key file."""
-    archive = Path(json.loads((ROOT / 'private/exports/latest.json').read_text())['path']).resolve()
+    data = private_config()
     account = account_dir()
-    marker = json.loads((archive / 'archive.json').read_text())
-    if marker['account_id'] != account.name:
-        raise ValueError('archive_account_mismatch')
-    return {'account': account, 'archive': archive, 'keys': keys_file()}
+    archive = data.get('seedArchive')
+    latest = LEGACY_ARCHIVE / 'latest.json'
+    if LEGACY and not archive and latest.exists():
+        archive = json.loads(latest.read_text(encoding='utf-8'))['path']
+    if archive:
+        archive = Path(archive).expanduser().resolve()
+        marker = json.loads((archive / 'archive.json').read_text(encoding='utf-8'))
+        if marker['account_id'] != account.name:
+            raise ValueError('archive_account_mismatch')
+    return {'account': account, 'keys': keys_file(), 'archive': archive}
 
 
 def node():
-    """Node.js used for local media codecs; override with WECHAT_NODE."""
     candidate = os.environ.get('WECHAT_NODE') or shutil.which('node')
-    if candidate and Path(candidate).exists():
-        return str(candidate)
-    roots = sorted((Path.home() / '.nvm/versions/node').glob('*/bin/node'),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in roots:
-        if path.exists():
-            return str(path)
-    raise RuntimeError('node_missing; install Node or set WECHAT_NODE')
+    if not candidate and not WINDOWS:
+        candidate = next(
+            iter(sorted((Path.home() / '.nvm/versions/node').glob('*/bin/node'), reverse=True)), None
+        )
+    if not candidate:
+        raise RuntimeError('node_missing')
+    return str(candidate)
 
 
+@lru_cache(maxsize=1)
 def documents_python():
-    """Python with pypdf/openpyxl for document text extraction.
-
-    The service venv intentionally stays minimal, so document extraction runs in a
-    separate interpreter. Probe candidates once and cache the first working one.
-    """
-    global _DOCUMENT_RUNTIME
-    if _DOCUMENT_RUNTIME:
-        return _DOCUMENT_RUNTIME
-    codex = Path.home() / '.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3'
-    candidates = [os.environ.get('WECHAT_DOC_RUNTIME'), str(codex), sys.executable,
-                  shutil.which('python3'), '/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14']
-    for candidate in candidates:
-        if not candidate or not Path(candidate).exists():
-            continue
-        probe = subprocess.run([str(candidate), '-c', 'import pypdf, openpyxl'],
-                               capture_output=True, timeout=30)
-        if probe.returncode == 0:
-            _DOCUMENT_RUNTIME = str(candidate)
-            return _DOCUMENT_RUNTIME
-    raise RuntimeError('document_runtime_missing; install pypdf and openpyxl or set WECHAT_DOC_RUNTIME')
+    for candidate in (
+        os.environ.get('WECHAT_DOC_RUNTIME'),
+        sys.executable,
+        Path.home() / '.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3',
+    ):
+        if candidate and Path(candidate).is_file():
+            if (
+                subprocess.run(
+                    [str(candidate), '-c', 'import pypdf, openpyxl'], capture_output=True, timeout=30
+                ).returncode
+                == 0
+            ):
+                return str(candidate)
+    raise RuntimeError('document_runtime_missing: install the documents extra or set WECHAT_DOC_RUNTIME')
 
 
 def wcdb_library():
-    """SQLCipher-compatible library used only for read-only database snapshots."""
     return Path(os.environ.get('SQLCIPHER_LIBRARY') or WCDB_LIBRARY)
-
-
-def system_ca():
-    """Pinned CA bundle shipped with the archive reader (local localhost CDN only)."""
-    return Path(__file__).with_name('archive') / 'system-ca.pem'

@@ -12,8 +12,8 @@ def clean(value):
  return value.encode('utf-8','replace').decode('utf-8')
 
 root=Path(sys.argv[1]);seen={};rows=[];now=time.time()
-previous={r['sha256']:r for r in json.loads((root/'document-index.json').read_text())} if (root/'document-index.json').exists() else {}
-for line in (root/'asset-inventory.jsonl').read_text().splitlines():
+previous={r['sha256']:r for r in json.loads((root/'document-index.json').read_text(encoding='utf-8'))} if (root/'document-index.json').exists() else {}
+for line in (root/'asset-inventory.jsonl').read_text(encoding='utf-8').splitlines():
  entry=json.loads(line);asset=entry.get('original')
  if not asset:continue
  source=entry['source'];ext=Path(source).suffix.lower()
@@ -36,11 +36,11 @@ for line in (root/'asset-inventory.jsonl').read_text().splitlines():
    if not any(t.strip() for t in texts):
     row['status']='requires_ocr'
     ocr=Path(__file__).with_name('pdf_ocr');ocrout=root/'document-text'/(key+'.ocr.txt');ocrout.parent.mkdir(exist_ok=True)
-    if ocr.exists():
+    if sys.platform=='darwin' and ocr.exists():
      # Bound OCR below the daemon's 30-minute media-job timeout; oversized scans retry hourly.
      done=subprocess.run([str(ocr),str(file),str(ocrout)],capture_output=True,text=True,timeout=min(max(60,len(texts)*45),1200))
      if done.returncode==0 and ocrout.exists():
-      parts=[clean(ocrout.read_text())];row['status']='ocr_extracted';row['note']='Local Apple Vision OCR; check the original for recognition errors.'
+      parts=[clean(ocrout.read_text(encoding='utf-8'))];row['status']='ocr_extracted';row['note']='Local Apple Vision OCR; check the original for recognition errors.'
   elif ext=='.xlsx':
    book=openpyxl.load_workbook(file,read_only=True,data_only=False)
    for sheet in book:
@@ -63,10 +63,12 @@ for line in (root/'asset-inventory.jsonl').read_text().splitlines():
        if text:parts.append(text)
   text=clean('\n\n'.join(parts).strip())
   if row.get('status') not in ['requires_ocr','ocr_extracted']:row['status']='extracted' if text else 'empty'
-  dest=Path('document-text')/(key+'.txt');(root/dest).parent.mkdir(exist_ok=True);(root/dest).write_text(clean(text+'\n'));row.update(text_path=str(dest),characters=len(text))
+  dest=Path('document-text')/(key+'.txt');(root/dest).parent.mkdir(exist_ok=True);(root/dest).write_text(clean(text+'\n'),encoding='utf-8');row.update(text_path=dest.as_posix(),characters=len(text))
   if row['status'] in ['requires_ocr']:row['retry_after']=now+RETRY_SECONDS
  except Exception as e:
   row.update(status='failed',error=clean(type(e).__name__+': '+str(e)[:180]),retry_after=now+RETRY_SECONDS)
  seen[key]=row;rows.append(row)
-(root/'document-index.json').write_text(clean(json.dumps(rows,ensure_ascii=False,indent=2)+'\n'))
+temporary=root/'document-index.json.partial'
+temporary.write_text(clean(json.dumps(rows,ensure_ascii=False,indent=2)+'\n'),encoding='utf-8')
+temporary.replace(root/'document-index.json')
 print(json.dumps({'documents':len(rows),'extracted':sum(r['status']=='extracted' for r in rows),'ocr_extracted':sum(r['status']=='ocr_extracted' for r in rows),'requires_ocr':sum(r['status']=='requires_ocr' for r in rows),'failed':sum(r['status']=='failed' for r in rows)}))

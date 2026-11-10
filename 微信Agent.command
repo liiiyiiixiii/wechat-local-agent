@@ -5,4 +5,6 @@ if (( $# == 0 )); then
   set -- status
 fi
 export PYTHONPATH="$TASK_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$TASK_ROOT/private/agent-venv/bin/python" -m wxlocal.api.cli "$@"
+python="$TASK_ROOT/.venv/bin/python"
+[[ -x "$python" ]] || python="$TASK_ROOT/private/agent-venv/bin/python"
+exec "$python" -m wxlocal.api.cli "$@"

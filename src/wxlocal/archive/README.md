@@ -8,15 +8,15 @@
 
 ```sh
 # 批量归档（在仓库根目录，使用服务 venv）
-PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.pipeline
-PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.pipeline --offline
-PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.pipeline --resume '/绝对路径/归档目录'
+python -m wxlocal.archive.pipeline
+python -m wxlocal.archive.pipeline --offline
+python -m wxlocal.archive.pipeline --resume '/绝对路径/归档目录'
 
 # 独立核对一份归档
-PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.audit '/绝对路径/归档目录'
+python -m wxlocal.archive.audit '/绝对路径/归档目录'
 ```
 
-默认每次在 `private/exports/wechat-时间戳/` 新建归档；`latest.json` 指向最近完成的一份。
+默认每次在 `exports/wechat-时间戳/` 新建归档；`latest.json` 指向最近完成的一份。
 `--resume` 沿用已有数据库快照；要包含更新消息请新建归档。
 
 ## 目录内容
@@ -26,7 +26,7 @@ PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.audit '/绝对�
 3. `conversations/`：每个会话的 `messages.jsonl`（含原始字段）和按月 Markdown。
 4. `assets/`：按内容 SHA-256 去重后的图片、语音 WAV、视频、表情、文档等原文件。
 5. `document-index.json` / `document-text/`：PDF、Word、表格、幻灯片的文本副本
-   （版式以原文件为准；扫描 PDF 用本机 Apple Vision OCR）。
+   （版式以原文件为准；macOS 扫描 PDF 可用本机 Apple Vision OCR）。
 6. `asset-inventory.jsonl`：原路径到导出文件的映射；`missing-media.jsonl`：未匹配媒体。
 7. `databases/`：所有本地数据库的明文 SQLite 快照和逐表校验结果。
 8. `audit.json`：独立逐字段/文件哈希校验结果。
@@ -34,8 +34,7 @@ PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.audit '/绝对�
 ## 边界
 
 - 只能读取本机已同步的数据；未下载、已过期或已从本机移除的媒体不能凭空恢复。
-- 默认会从消息中明确引用的微信官方 CDN 补齐表情，限制域名并校验消息 MD5；
-  `--offline` 禁用。
+- 默认离线。配置 `allowCdn=true` 后可请求消息引用的微信 CDN 表情，校验 MD5；批量导出的 `--offline` 强制离线。
 - 附件不会被执行、不自动解压；不联网抓取消息中的网页。
 - 语音输出 WAV，不做自动语音识别；OCR 结果可能出错，应与原 PDF 核对。
 - 超大扫描 PDF 的单次 OCR 运行约 20 分钟封顶（低于媒体任务 30 分钟上限），
@@ -44,9 +43,4 @@ PYTHONPATH=src private/agent-venv/bin/python -m wxlocal.archive.audit '/绝对�
 
 ## 运行依赖
 
-- SQLCipher 兼容库：`validation/components/macos-arm64/libWCDB.dylib`
-  （可用 `SQLCIPHER_LIBRARY` 覆盖）。
-- Node.js + `validation/WeFlow/node_modules/silk-wasm`（语音 SILK 解码）。
-- 具备 `pypdf`、`openpyxl` 的 Python（自动探测；可用 `WECHAT_DOC_RUNTIME` 指定）。
-- 本机 `ffmpeg`（转码）。
-- 密钥配置位于 `private/`（不入库）。
+使用已安装项目的 Python 环境。数据库驱动、可选的媒体组件和平台实测范围见[项目首页](../../../README.md)及[运维说明](../../../docs/operations.md)。

@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -11,8 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from wxlocal.archive.sqlcipher import DB
 from wxlocal.collector import Collector, Native
 from wxlocal.scheduler import MediaTrigger
-from wxlocal.sources import generation
-from wxlocal.store import Store, message_id
+from wxlocal.store import Store
 from wxlocal.util import dumps, sha
 
 
@@ -29,7 +27,7 @@ class ServiceTests(unittest.TestCase):
         self.store = Store(self.root/'index.sqlite', 'test-account')
 
     def tearDown(self):
-        self.store.close();self.temp.cleanup()
+        self.store.close();self.doCleanups();self.temp.cleanup()
 
     def add(self, r, gen='generation-one'):
         with self.store.c:
@@ -193,6 +191,80 @@ class ServiceTests(unittest.TestCase):
         row=self.store.c.execute("SELECT requested,completed FROM jobs WHERE id='media'").fetchone()
         self.assertEqual((row['requested'],row['completed']),(1,0))
         c.close()
+
+    def test_append_with_historic_media_and_interrupted_reconcile(self):
+        account,path,writer,table = self.source_fixture()
+        self.addCleanup(writer.close)
+        writer.execute('UPDATE '+table+' SET local_type=3 WHERE local_id=1')
+        writer.executemany('INSERT INTO '+table+' VALUES(?,?,1,1735689600,1,?,NULL)',
+                           ((n,n+1000,'history') for n in range(2,700)))
+        writer.commit()
+        collector = Collector(self.root,account,fixture=True)
+        original = Store.upsert
+        def interrupt(store,record,*args,**kwargs):
+            if record['local_id']==300:
+                raise RuntimeError('interrupted')
+            return original(store,record,*args,**kwargs)
+        with patch.object(Store,'upsert',interrupt):
+            self.assertTrue(collector.sync_once()['errors'])
+        self.assertEqual(self.store.get_status()['messages'],256)
+        self.assertFalse(collector.sync_once()['errors'])
+        self.assertEqual(self.store.get_status()['latest_change'],699)
+        with self.store.c:
+            self.store.c.execute("UPDATE jobs SET completed=requested,state='idle'")
+        writer.execute('INSERT INTO '+table+' VALUES(700,1700,1,1735689600,1,?,NULL)',('new text',))
+        writer.commit()
+        result=collector.sync_once()
+        self.assertEqual(result['rows_scanned'],33)
+        self.assertEqual(result['changed'],1)
+        self.assertEqual(self.store.get_status()['media_job']['state'],'idle')
+        writer.execute('UPDATE '+table+' SET message_content=? WHERE local_id=50',('history edit',))
+        writer.commit()
+        self.assertFalse(collector.sync_once(force=True)['errors'])
+        self.assertEqual(len(self.store.search_messages('history edit')['items']),1)
+
+    def test_concurrent_ack_is_monotonic(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        for n in range(1,4):
+            self.add(record(n,str(n)))
+        for trial in range(8):
+            consumer='parallel-'+str(trial)
+            self.store.get_changes(consumer,True)
+            barrier=threading.Barrier(2)
+            def confirm(cursor):
+                local=Store(self.root/'index.sqlite')
+                try:
+                    barrier.wait(timeout=5)
+                    try:
+                        local.ack_changes(consumer,cursor)
+                    except ValueError:
+                        if cursor!=1:
+                            raise
+                finally:
+                    local.close()
+            with ThreadPoolExecutor(2) as pool:
+                list(pool.map(confirm,(1,3)))
+            self.assertEqual(self.store.get_changes(consumer)['confirmed_cursor'],3)
+
+    def test_old_progress_and_confirmed_cursor_survive_upgrade(self):
+        account,path,writer,table=self.source_fixture()
+        self.addCleanup(writer.close)
+        collector=Collector(self.root,account,fixture=True)
+        collector.sync_once()
+        mid=self.store.search_messages('第一条')['items'][0]['id']
+        batch=self.store.get_changes('old-workflow',True)
+        self.store.ack_changes('old-workflow',batch['ack_cursor'])
+        # v1 stored per-table max_local_id and count, before rowid checkpoints were introduced.
+        import json
+        with self.store.c:
+            self.store.c.execute('UPDATE sources SET progress=?',(json.dumps({table:{'max_local_id':1,'rows':1}}),))
+        restarted=Collector(self.root,account,fixture=True)
+        self.assertFalse(restarted.sync_once()['errors'])
+        self.assertEqual(self.store.search_messages('第一条')['items'][0]['id'],mid)
+        result=self.store.get_changes('old-workflow')
+        self.assertEqual(result['confirmed_cursor'],batch['ack_cursor'])
+        self.assertEqual(result['items'],[])
 
     def source_fixture(self):
         account=self.root/'test-account';directory=account/'db_storage/message';directory.mkdir(parents=True)

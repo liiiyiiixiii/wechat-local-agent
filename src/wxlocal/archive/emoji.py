@@ -16,9 +16,18 @@ HOSTS = {'wxapp.tc.qq.com', 'vweixinf.tc.qq.com', 'mmbiz.qpic.cn'}
 MAX_BYTES = 20 * 1024 * 1024
 
 
+def allowed(url):
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return (parts.scheme in ('http','https') and parts.hostname in HOSTS and
+                not parts.username and not parts.password and parts.port in (None,80,443))
+    except ValueError:
+        return False
+
+
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).hostname not in HOSTS:
+        if not allowed(newurl):
             raise ValueError('redirect_host_not_allowed')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -42,10 +51,9 @@ def ssl_context():
 
 def fetch(job, out, context):
     for url in job['urls']:
-        parts = urllib.parse.urlsplit(url)
-        if parts.hostname not in HOSTS or parts.username or parts.password or parts.scheme not in {'http', 'https'} \
-                or parts.port not in {None, 80, 443}:
+        if not allowed(url):
             continue
+        parts = urllib.parse.urlsplit(url)
         url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ''))
         try:
             opener = urllib.request.build_opener(SafeRedirect(), urllib.request.HTTPSHandler(context=context))
@@ -74,7 +82,7 @@ def fetch(job, out, context):
 
 def main():
     out = Path(sys.argv[1])
-    jobs = [json.loads(line) for line in (out / 'emoji-download-jobs.jsonl').read_text().splitlines()]
+    jobs = [json.loads(line) for line in (out / 'emoji-download-jobs.jsonl').read_text(encoding='utf-8').splitlines()]
     context = ssl_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         rows = list(pool.map(lambda job: fetch(job, out, context), jobs))

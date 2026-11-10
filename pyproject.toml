@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-local-agent"
+version = "1.1.0"
+description = "Current-user WeChat message index, archive and MCP service"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.27,<2", "zstandard>=0.22; python_version<'3.14'", "pywin32>=311; sys_platform=='win32'", "sqlcipher3-wheels==0.5.7; sys_platform=='win32'"]
+
+[project.optional-dependencies]
+documents = ["openpyxl>=3.1,<4", "pypdf>=5,<8"]
+
+[project.scripts]
+wxlocal = "wxlocal.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"wxlocal.archive" = ["*.cjs", "*.pem", "pdf_ocr"]

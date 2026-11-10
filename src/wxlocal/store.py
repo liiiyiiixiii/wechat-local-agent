@@ -1,5 +1,4 @@
 """Transactional searchable index. Source records stay private; API uses curated fields."""
-import base64
 import datetime as dt
 import json
 import mimetypes
@@ -100,6 +99,7 @@ def message_id(account, record, generation):
 
 class Store:
     def __init__(self, path, account=None):
+        self.events_written = 0
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.c = sqlite3.connect(self.path, timeout=30)
@@ -125,12 +125,14 @@ class Store:
     def setmeta(self, key, value):
         self.c.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key, dumps(value)))
 
-    def queue_media(self):
+    def queue_media(self, reason=None):
         """Queue the media rebuild without piling generations up.
 
         One pending job when idle; one follow-up behind a running job. Repeated source
         changes therefore coalesce instead of queueing a full archive rebuild each time.
         """
+        if reason and self.meta('media_queue_reason') != reason:
+            self.setmeta('media_queue_reason',reason)
         row = self.c.execute("SELECT state,requested,completed FROM jobs WHERE id='media'").fetchone()
         if row is None:
             self.c.execute("INSERT INTO jobs(id,state,requested) VALUES('media','pending',1)")
@@ -146,6 +148,7 @@ class Store:
     def event(self, kind, mid, version, details=None):
         self.c.execute('INSERT INTO changes(kind,message_id,at,version,details) VALUES(?,?,?,?,?)',
                        (kind, mid, time.time(), version, dumps(details or {})))
+        self.events_written += 1
 
     def contacts(self, contacts):
         for cid, item in contacts.items():
@@ -153,7 +156,7 @@ class Store:
             self.c.execute('INSERT OR REPLACE INTO conversations VALUES(?,?,?,?)',
                            (cid, remark or nick or cid, nick, remark))
 
-    def upsert(self, record, generation, emit=True):
+    def upsert(self, record, generation, emit=True, schedule_media=False):
         mid = message_id(self.meta('account'), record, generation)
         text = safe_text(record)
         raw = dumps(record.get('raw', {}))
@@ -182,6 +185,9 @@ class Store:
         if changed:
             self.c.execute('INSERT INTO search_entries(message_id,asset_id,body) VALUES(?,\'\',?) '
                            'ON CONFLICT(message_id,asset_id) DO UPDATE SET body=excluded.body', (mid, text))
+            media = {'image', 'voice', 'video', 'file', 'emoji'}
+            if schedule_media and (record['type'] in media or (old and old['kind'] in media)):
+                self.queue_media('media_record_changed')
             if emit:
                 self.event('message_added' if old is None else 'message_updated', mid, version)
         return mid
@@ -193,10 +199,10 @@ class Store:
             if not path.is_file():
                 continue
             text_path = self.checked_path(archive, a['text_path']) if a.get('text_path') else None
-            text = text_path.read_text(errors='replace') if text_path and text_path.is_file() else ''
+            text = text_path.read_text(encoding='utf-8',errors='replace') if text_path and text_path.is_file() else ''
             extraction = a.get('text_extraction_status', 'not_extracted')
             if not text and path.suffix.lower() in ('.txt', '.md', '.csv', '.json', '.log') and path.stat().st_size <= 5_000_000:
-                text = path.read_text(errors='replace');extraction = 'plain_text'
+                text = path.read_text(encoding='utf-8',errors='replace');extraction = 'plain_text'
             prepared.append((a, path, text_path, text, extraction))
         prepared.sort(key=lambda item: (item[0]['sha256'], item[0].get('source', '')))
         fingerprint = sha(dumps([record.get('media_status'), [
@@ -266,7 +272,7 @@ class Store:
                 'messages': self.c.execute('SELECT count(*) FROM messages').fetchone()[0],
                 'conversations_with_messages': self.c.execute('SELECT count(DISTINCT chat) FROM messages').fetchone()[0],
                 'attachments': self.c.execute('SELECT count(*) FROM attachments').fetchone()[0],
-                'sync': sync, 'media_job': dict(self.c.execute("SELECT * FROM jobs WHERE id='media'").fetchone() or {}),
+                'sync': sync, 'media_queue_reason': self.meta('media_queue_reason'), 'media_job': dict(self.c.execute("SELECT * FROM jobs WHERE id='media'").fetchone() or {}),
                 'source_errors': [dict(r) for r in self.c.execute('SELECT db,error FROM sources WHERE error IS NOT NULL')],
                 'latest_change': self.c.execute('SELECT coalesce(max(seq),0) FROM changes').fetchone()[0],
                 'media_status_counts': dict(self.c.execute('SELECT media_status,count(*) FROM messages GROUP BY media_status')),
@@ -380,10 +386,12 @@ class Store:
 
     def ack_changes(self, consumer_id, cursor):
         with self.c:
-            r = self.c.execute('SELECT * FROM consumers WHERE id=?', (consumer_id,)).fetchone()
-            if r is None or not isinstance(cursor, int) or not r['ack'] <= cursor <= r['delivered']:
+            if type(cursor) is not int or not 0 <= cursor < 2**63:
+                raise ValueError('invalid_cursor')
+            changed = self.c.execute('UPDATE consumers SET ack=? WHERE id=? AND ack<=? AND delivered>=?',
+                                     (cursor, consumer_id, cursor, cursor))
+            if changed.rowcount != 1:
                 raise ValueError('cursor_not_delivered_or_regressed')
-            self.c.execute('UPDATE consumers SET ack=? WHERE id=?', (cursor, consumer_id))
         return {'consumer_id': consumer_id, 'confirmed_cursor': cursor}
 
     def call(self, method, params):
